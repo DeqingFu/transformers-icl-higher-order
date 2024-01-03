@@ -28,7 +28,7 @@ for i in range(1, n_layer+1):
     probe_i_conf['training']['resume_id'] = f'probing_{i}'
     probe_i_conf['training']['data'] = 'gaussian'
     probe_i_conf['wandb']['name'] = f"linear_regression_probing_{i}"
-    probe_i_conf['wandb']['entity'] = 'deqingfu'
+    probe_i_conf['wandb']['entity'] = '<your-wandb-username>'
     probe_i_conf['wandb']['project'] = 'transformers_icl_opt'
     probe_i_conf['out_dir'] = os.path.abspath(f"../models/by_layer_linear/")
      ## Remove curriculum

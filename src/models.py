@@ -3,16 +3,14 @@ import torch.nn as nn
 from transformers import GPT2Model, GPT2Config
 from tqdm import tqdm
 from sklearn.svm import LinearSVC
-from sklearn.linear_model import LogisticRegression, Lasso, Ridge
-from sklearn.kernel_ridge import KernelRidge
-from sklearn.metrics.pairwise import cosine_similarity
+from sklearn.linear_model import LogisticRegression, Lasso
 import warnings
 from sklearn import tree
 import xgboost as xgb
-
-from base_models import NeuralNetwork, ParallelNetworks
-import pdb 
 import numpy as np
+import pdb 
+from base_models import NeuralNetwork, ParallelNetworks
+
 
 def build_model(conf):
     if conf.family == "gpt2":
@@ -41,14 +39,52 @@ def get_relevant_baselines(task_name):
             (NNModel, {"n_neighbors": 3}),
             (AveragingModel, {}),
         ],
+        "linear_classification": [
+            (NNModel, {"n_neighbors": 3}),
+            (AveragingModel, {}),
+        ],
+        "sparse_linear_regression": [
+            (LeastSquaresModel, {}),
+            (NNModel, {"n_neighbors": 3}),
+            (AveragingModel, {}),
+        ]
+        + [(LassoModel, {"alpha": alpha}) for alpha in [1, 0.1, 0.01, 0.001, 0.0001]],
+        "relu_2nn_regression": [
+            (LeastSquaresModel, {}),
+            (NNModel, {"n_neighbors": 3}),
+            (AveragingModel, {}),
+            (
+                GDModel,
+                {
+                    "model_class": NeuralNetwork,
+                    "model_class_args": {
+                        "in_size": 20,
+                        "hidden_size": 100,
+                        "out_size": 1,
+                    },
+                    "opt_alg": "adam",
+                    "batch_size": 100,
+                    "lr": 5e-3,
+                    "num_steps": 100,
+                },
+            ),
+        ],
+        "decision_tree": [
+            (LeastSquaresModel, {}),
+            (NNModel, {"n_neighbors": 3}),
+            (DecisionTreeModel, {"max_depth": 4}),
+            (DecisionTreeModel, {"max_depth": None}),
+            (XGBoostModel, {}),
+            (AveragingModel, {}),
+        ],
     }
 
     models = [model_cls(**kwargs) for model_cls, kwargs in task_to_baselines[task_name]]
     return models
 
+
 class TransformerModel(nn.Module):
-    def __init__(self, n_dims, n_positions, n_embd=128, n_layer=12, n_head=4, \
-                 output_attentions=False, use_first_n_layer=12):
+    def __init__(self, n_dims, n_positions, n_embd=128, n_layer=12, n_head=4, output_attentions=False, use_first_n_layer=12):
         super(TransformerModel, self).__init__()
         configuration = GPT2Config(
             n_positions=2 * n_positions,
@@ -163,7 +199,7 @@ class LeastSquaresModel:
         self.driver = driver
         self.name = f"OLS_driver={driver}"
 
-    def __call__(self, xs, ys, inds=None, output_w=False):
+    def __call__(self, xs, ys, inds=None, return_all_ws=False):
         xs, ys = xs.cpu(), ys.cpu()
         if inds is None:
             inds = range(ys.shape[1])
@@ -172,13 +208,11 @@ class LeastSquaresModel:
                 raise ValueError("inds contain indices where xs and ys are not defined")
 
         preds = []
-        if output_w:
-            w_prediction = []
+        if return_all_ws:
+            all_ws = {}
         for i in inds:
             if i == 0:
                 preds.append(torch.zeros_like(ys[:, 0]))  # predict zero for first point
-                if output_w:
-                    w_prediction.append(torch.zeros_like(xs[:, 0]))
                 continue
             train_xs, train_ys = xs[:, :i], ys[:, :i]
             test_x = xs[:, i : i + 1]
@@ -187,316 +221,15 @@ class LeastSquaresModel:
                 train_xs, train_ys.unsqueeze(2), driver=self.driver
             )
 
-            if output_w:
-                w_prediction.append(ws[:,:,0])
             pred = test_x @ ws
             preds.append(pred[:, 0, 0])
-
-        if output_w:
-            return torch.stack(preds, dim=1), torch.stack(w_prediction).permute(1,0,2)
-        else:
-            return torch.stack(preds, dim=1)
-
-
-# xs and ys should be on cpu for this method. Otherwise the output maybe off in case when train_xs is not full rank due to the implementation of torch.linalg.lstsq.
-class LeastSquaresModelGradientDescent:
-    def __init__(self, n_steps=3, step_size=1.0, weight_decay=0.0):
-        self.n_steps = n_steps
-        self.step_size = step_size
-        self.weight_decay = weight_decay
-        self.name = f"OLS_GD_steps={n_steps}"
-
-    def gradient_descent(self, X, y):
-        # w = torch.rand(X.shape[1], 1) / np.sqrt(X.shape[1])
-        w = torch.zeros(X.shape[1], 1)
-        
-        for _ in range(self.n_steps):
-            grad = (X.T @ X) @ w - (X.T@y)[:, None]
-            updates = self.step_size * grad  + self.weight_decay * w
-            w = w - updates
-
-        return w
-
-    def __call__(self, xs, ys, inds=None, return_all_ws=False):
-        xs, ys = xs.cpu(), ys.cpu()
-        if inds is None:
-            inds = range(ys.shape[1])
-        else:
-            if max(inds) >= ys.shape[1] or min(inds) < 0:
-                raise ValueError("inds contain indices where xs and ys are not defined")
-
-        preds = []
-        all_ws = {}
-        for i in inds:
-            if i == 0:
-                preds.append(torch.zeros_like(ys[:, 0]))  # predict zero for first point
-                continue
-            train_xs, train_ys = xs[:, :i], ys[:, :i]
-            test_x = xs[:, i : i + 1]
-
-            ws = torch.zeros(test_x.shape[0], test_x.shape[2], 1)
-
-            for b in range(test_x.shape[0]):
-                train_x = train_xs[b]
-                train_y = train_ys[b]
-                
-                w = self.gradient_descent(train_x, train_y)
-                ws[b] = w
-
-            pred = test_x @ ws
-            preds.append(pred[:, 0, 0])
-            all_ws[i] = ws
+            if return_all_ws:
+                all_ws[i] = ws
         if return_all_ws:
             return torch.stack(preds, dim=1), all_ws
         else:
             return torch.stack(preds, dim=1)
 
-class LeastSquaresModelOnlineGradientDescent:
-    def __init__(self, step_size=1.0, weight_decay=0.0):
-        self.step_size = step_size
-        self.weight_decay = weight_decay
-        self.name = f"OLS_OGD_step_size={step_size}"
-
-    def gradient_descent(self, X, y):
-        w = torch.rand(X.shape[1], 1)
-        n_samples = X.shape[0]
-        for i in range(n_samples):
-            xi = X[i][:,None]; yi=y[i]
-            grad = xi @ xi.T @ w - yi * xi
-            updates = self.step_size * grad  + self.weight_decay * w
-            w = w - updates
-
-        return w
-
-    def __call__(self, xs, ys, inds=None, return_all_ws=False):
-        xs, ys = xs.cpu(), ys.cpu()
-        if inds is None:
-            inds = range(ys.shape[1])
-        else:
-            if max(inds) >= ys.shape[1] or min(inds) < 0:
-                raise ValueError("inds contain indices where xs and ys are not defined")
-
-        preds = []
-        all_ws = {}
-        for i in inds:
-            if i == 0:
-                preds.append(torch.zeros_like(ys[:, 0]))  # predict zero for first point
-                continue
-            train_xs, train_ys = xs[:, :i], ys[:, :i]
-            test_x = xs[:, i : i + 1]
-
-            ws = torch.zeros(test_x.shape[0], test_x.shape[2], 1)
-
-            for b in range(test_x.shape[0]):
-                train_x = train_xs[b]
-                train_y = train_ys[b]
-                
-                w = self.gradient_descent(train_x, train_y)
-                ws[b] = w
-
-            pred = test_x @ ws
-            preds.append(pred[:, 0, 0])
-            all_ws[i] = ws
-        if return_all_ws:
-            return torch.stack(preds, dim=1), all_ws
-        else:
-            return torch.stack(preds, dim=1)
-        
-class LeastSquaresModelAdaptiveOnlineGradientDescent:
-    def __init__(self):
-        self.name = f"OLS_Adaptive_OGD"
-
-    def gradient_descent(self, X, y):
-        w = torch.rand(X.shape[1], 1) / np.sqrt(X.shape[1])
-        n_samples = X.shape[0]
-        for i in range(n_samples):
-            xi = X[i][:,None]; yi=y[i]
-            grad = xi @ xi.T @ w - yi * xi
-            step_size = (1 / (xi.T @ xi)).item()
-            updates = step_size * grad
-            w = w - updates
-
-        return w
-
-    def __call__(self, xs, ys, inds=None, return_all_ws=False):
-        xs, ys = xs.cpu(), ys.cpu()
-        if inds is None:
-            inds = range(ys.shape[1])
-        else:
-            if max(inds) >= ys.shape[1] or min(inds) < 0:
-                raise ValueError("inds contain indices where xs and ys are not defined")
-
-        preds = []
-        all_ws = {}
-        for i in inds:
-            if i == 0:
-                preds.append(torch.zeros_like(ys[:, 0]))  # predict zero for first point
-                continue
-            train_xs, train_ys = xs[:, :i], ys[:, :i]
-            test_x = xs[:, i : i + 1]
-
-            ws = torch.zeros(test_x.shape[0], test_x.shape[2], 1)
-
-            for b in range(test_x.shape[0]):
-                train_x = train_xs[b]
-                train_y = train_ys[b]
-                
-                w = self.gradient_descent(train_x, train_y)
-                ws[b] = w
-
-            pred = test_x @ ws
-            preds.append(pred[:, 0, 0])
-            all_ws[i] = ws
-        if return_all_ws:
-            return torch.stack(preds, dim=1), all_ws
-        else:
-            return torch.stack(preds, dim=1)
-
-class LeastSquaresModelNewtonMethod:
-    def __init__(self, n_newton_steps=3):
-        self.n_newton_steps = n_newton_steps
-        self.name = f"OLS_newton_inv={n_newton_steps}"
-
-    def newton_inv(self, A):
-        lam = torch.linalg.norm(A @ A.T)
-        alpha = 2/lam
-        inv = alpha * A.T 
-        eye = torch.eye(A.shape[0])
-        
-        for i in range(self.n_newton_steps):
-            inv = inv @ (2*eye-A@inv)
-
-        return inv
-
-    def __call__(self, xs, ys, inds=None, return_all_ws=False, return_all_invs=False):
-        xs, ys = xs.cpu(), ys.cpu()
-        if inds is None:
-            inds = range(ys.shape[1])
-        else:
-            if max(inds) >= ys.shape[1] or min(inds) < 0:
-                raise ValueError("inds contain indices where xs and ys are not defined")
-
-        preds = []
-        all_ws = {}
-        all_invs = {}
-        for i in inds:
-            if i == 0:
-                preds.append(torch.zeros_like(ys[:, 0]))  # predict zero for first point
-                continue
-            train_xs, train_ys = xs[:, :i], ys[:, :i]
-            test_x = xs[:, i : i + 1]
-            invs = []
-            ws = torch.zeros(test_x.shape[0], test_x.shape[2], 1)
-            for b in range(test_x.shape[0]):
-                train_x = train_xs[b]
-                train_y = train_ys[b]
-                
-                X = train_x.T @ train_x
-                y = train_x.T @ train_y
-                inv = self.newton_inv(X)
-                invs.append(inv[None,])
-                w = inv @ y[:,None] 
-                
-                ws[b] = w
-            
-            invs = torch.cat(invs, dim=0)
-            all_invs[i] = invs
-                    
-
-            pred = test_x @ ws
-            preds.append(pred[:, 0, 0])
-            all_ws[i] =  ws
-
-        if return_all_ws:
-            if return_all_invs:
-                return torch.stack(preds, dim=1), all_ws, all_invs
-            else:
-                return torch.stack(preds, dim=1), all_ws
-        else:
-            return torch.stack(preds, dim=1)
-
-
-class KernelRegression:
-    def __init__(self, kernel="linear", alpha=1.0, degree=2):
-        self.name = f"kernel_regression"
-        self.kernel = kernel 
-        self.alpha = alpha 
-        self.degree = degree #degree for polynomial kernel
-
-
-    def __call__(self, xs, ys, inds=None):
-        xs, ys = xs.cpu(), ys.cpu()
-        if inds is None:
-            inds = range(ys.shape[1])
-        else:
-            if max(inds) >= ys.shape[1] or min(inds) < 0:
-                raise ValueError("inds contain indices where xs and ys are not defined")
-
-        preds = []
-
-        for i in inds:
-            if i == 0:
-                preds.append(torch.zeros_like(ys[:, 0]))  # predict zero for first point
-                continue
-            train_xs, train_ys = xs[:, :i], ys[:, :i]
-            test_x = xs[:, i : i + 1]
-
-            ws = torch.zeros(test_x.shape[0], test_x.shape[2], 1)
-            pred = []
-            for b in range(test_x.shape[0]):
-                train_x = train_xs[b]
-                train_y = train_ys[b]
-                krr = KernelRidge(alpha=self.alpha, kernel=self.kernel, degree=self.degree)
-                krr.fit(train_x, train_y)
-                pred_y = krr.predict(test_x[b])
-                pred.append(pred_y)
-            pred = torch.FloatTensor(np.array(pred)).flatten() 
-            preds.append(pred)
-            
-
-        return torch.stack(preds, dim=1)
-
-class ProjectionModel:
-    def __init__(self):
-        self.name = f"projection"
-
-
-    def __call__(self, xs, ys, inds=None):
-        xs, ys = xs.cpu(), ys.cpu()
-        if inds is None:
-            inds = range(ys.shape[1])
-        else:
-            if max(inds) >= ys.shape[1] or min(inds) < 0:
-                raise ValueError("inds contain indices where xs and ys are not defined")
-
-        preds = []
-
-        for i in inds:
-            if i == 0:
-                preds.append(torch.zeros_like(ys[:, 0]))  # predict zero for first point
-                continue
-            train_xs, train_ys = xs[:, :i], ys[:, :i]
-            test_x = xs[:, i : i + 1]
-
-            ws = torch.zeros(test_x.shape[0], test_x.shape[2], 1)
-            pred = []
-            for b in range(test_x.shape[0]):
-                train_x = train_xs[b]
-                train_y = train_ys[b]
-                x_q = test_x[b]
-
-                pred_y = torch.tensor(0.0)
-                for i, x in enumerate(train_x):
-                    x_normalized = x/torch.linalg.norm(x, ord=2)
-                    proj = torch.inner(x_q.flatten()/torch.linalg.norm(x_q, ord=2), x_normalized.flatten())
-                    pred_y += proj * train_y[i]
-                    
-                pred.append(pred_y)
-            pred = torch.FloatTensor(np.array(pred)).flatten() 
-            preds.append(pred)
-            
-
-        return torch.stack(preds, dim=1)
 
 class AveragingModel:
     def __init__(self):
@@ -584,63 +317,6 @@ class LassoModel:
         return torch.stack(preds, dim=1)
 
 
-# Ridge regression (for regularized linear regression).
-# Seems to take more time as we decrease alpha.
-class RidgeModel:
-    def __init__(self, alpha, max_iter=100000):
-        # the l2 regularizer gets multiplied by alpha.
-        self.alpha = alpha
-        self.max_iter = max_iter
-        self.name = f"ridge_alpha={alpha}_max_iter={max_iter}"
-
-    # inds is a list containing indices where we want the prediction.
-    # prediction made at all indices by default.
-    def __call__(self, xs, ys, inds=None):
-        xs, ys = xs.cpu(), ys.cpu()
-
-        if inds is None:
-            inds = range(ys.shape[1])
-        else:
-            if max(inds) >= ys.shape[1] or min(inds) < 0:
-                raise ValueError("inds contain indices where xs and ys are not defined")
-
-        preds = []  # predict one for first point
-
-        # i: loop over num_points
-        # j: loop over bsize
-        for i in inds:
-            pred = torch.zeros_like(ys[:, 0])
-
-            if i > 0:
-                pred = torch.zeros_like(ys[:, 0])
-                for j in range(ys.shape[0]):
-                    train_xs, train_ys = xs[j, :i], ys[j, :i]
-
-                    # If all points till now have the same label, predict that label.
-
-                    clf = Ridge(
-                        alpha=self.alpha, fit_intercept=False, max_iter=self.max_iter
-                    )
-
-                    # Check for convergence.
-                    with warnings.catch_warnings():
-                        warnings.filterwarnings("error")
-                        try:
-                            clf.fit(train_xs, train_ys)
-                        except Warning:
-                            print(f"lasso convergence warning at i={i}, j={j}.")
-                            raise
-
-                    w_pred = torch.from_numpy(clf.coef_).unsqueeze(1)
-
-                    test_x = xs[j, i : i + 1]
-                    y_pred = (test_x @ w_pred.float()).squeeze(1)
-                    pred[j] = y_pred[0]
-
-            preds.append(pred)
-
-        return torch.stack(preds, dim=1)
-    
 # Gradient Descent and variants.
 # Example usage: gd_model = GDModel(NeuralNetwork, {'in_size': 50, 'hidden_size':400, 'out_size' :1}, opt_alg = 'adam', batch_size = 100, lr = 5e-3, num_steps = 200)
 class GDModel:
@@ -827,3 +503,225 @@ class XGBoostModel:
             preds.append(pred)
 
         return torch.stack(preds, dim=1)
+
+# xs and ys should be on cpu for this method. Otherwise the output maybe off in case when train_xs is not full rank due to the implementation of torch.linalg.lstsq.
+class LeastSquaresModelNewtonMethod:
+    def __init__(self, n_newton_steps=3):
+        self.n_newton_steps = n_newton_steps
+        self.name = f"OLS_newton_inv={n_newton_steps}"
+
+    def newton_inv(self, A):
+        lam = torch.linalg.norm(A @ A.T)
+        alpha = 1/lam
+        inv = alpha * A.T 
+        eye = torch.eye(A.shape[0])
+        
+        for i in range(self.n_newton_steps):
+            inv = inv @ (2*eye-A@inv)
+
+        return inv
+
+    def __call__(self, xs, ys, inds=None, return_all_ws=False, return_all_invs=False):
+        xs, ys = xs.cpu(), ys.cpu()
+        if inds is None:
+            inds = range(ys.shape[1])
+        else:
+            if max(inds) >= ys.shape[1] or min(inds) < 0:
+                raise ValueError("inds contain indices where xs and ys are not defined")
+
+        preds = []
+        all_ws = {}
+        all_invs = {}
+        for i in inds:
+            if i == 0:
+                preds.append(torch.zeros_like(ys[:, 0]))  # predict zero for first point
+                continue
+            train_xs, train_ys = xs[:, :i], ys[:, :i]
+            test_x = xs[:, i : i + 1]
+            invs = []
+            ws = torch.zeros(test_x.shape[0], test_x.shape[2], 1)
+            for b in range(test_x.shape[0]):
+                train_x = train_xs[b]
+                train_y = train_ys[b]
+                
+                X = train_x.T @ train_x
+                y = train_x.T @ train_y
+                inv = self.newton_inv(X)
+                invs.append(inv[None,])
+                w = inv @ y[:,None] 
+                
+                ws[b] = w
+            
+            invs = torch.cat(invs, dim=0)
+            all_invs[i] = invs
+                    
+
+            pred = test_x @ ws
+            preds.append(pred[:, 0, 0])
+            all_ws[i] =  ws
+
+        if return_all_ws:
+            if return_all_invs:
+                return torch.stack(preds, dim=1), all_ws, all_invs
+            else:
+                return torch.stack(preds, dim=1), all_ws
+        else:
+            return torch.stack(preds, dim=1)
+
+
+# xs and ys should be on cpu for this method. Otherwise the output maybe off in case when train_xs is not full rank due to the implementation of torch.linalg.lstsq.
+class LeastSquaresModelGradientDescent:
+    def __init__(self, n_steps=3, step_size=1.0, weight_decay=0.0):
+        self.n_steps = n_steps
+        self.step_size = step_size
+        self.weight_decay = weight_decay
+        self.name = f"OLS_GD_steps={n_steps}"
+
+    def gradient_descent(self, X, y):
+        #w = torch.rand(X.shape[1], 1)
+        #w = torch.rand(X.shape[1], 1) / np.sqrt(X.shape[1])
+        w = torch.zeros(X.shape[1], 1)
+        
+        for _ in range(self.n_steps):
+            grad = (X.T @ X) @ w - (X.T@y)[:, None]
+            updates = self.step_size * grad  + self.weight_decay * w
+            w = w - updates
+
+        return w
+
+    def __call__(self, xs, ys, inds=None, return_all_ws=False):
+        xs, ys = xs.cpu(), ys.cpu()
+        if inds is None:
+            inds = range(ys.shape[1])
+        else:
+            if max(inds) >= ys.shape[1] or min(inds) < 0:
+                raise ValueError("inds contain indices where xs and ys are not defined")
+
+        preds = []
+        all_ws = {}
+        for i in inds:
+            if i == 0:
+                preds.append(torch.zeros_like(ys[:, 0]))  # predict zero for first point
+                continue
+            train_xs, train_ys = xs[:, :i], ys[:, :i]
+            test_x = xs[:, i : i + 1]
+
+            ws = torch.zeros(test_x.shape[0], test_x.shape[2], 1)
+
+            for b in range(test_x.shape[0]):
+                train_x = train_xs[b]
+                train_y = train_ys[b]
+                
+                w = self.gradient_descent(train_x, train_y)
+                ws[b] = w
+
+            pred = test_x @ ws
+            preds.append(pred[:, 0, 0])
+            all_ws[i] = ws
+        if return_all_ws:
+            return torch.stack(preds, dim=1), all_ws
+        else:
+            return torch.stack(preds, dim=1)
+
+# xs and ys should be on cpu for this method. Otherwise the output maybe off in case when train_xs is not full rank due to the implementation of torch.linalg.lstsq.
+class LeastSquaresModelOnlineGradientDescent:
+    def __init__(self, step_size=1.0, weight_decay=0.0):
+        self.step_size = step_size
+        self.weight_decay = weight_decay
+        self.name = f"OLS_OGD_step_size={step_size}"
+
+    def gradient_descent(self, X, y):
+        w = torch.rand(X.shape[1], 1)
+        n_samples = X.shape[0]
+        for i in range(n_samples):
+            xi = X[i][:,None]; yi=y[i]
+            grad = xi @ xi.T @ w - yi * xi
+            updates = self.step_size * grad  + self.weight_decay * w
+            w = w - updates
+
+        return w
+
+    def __call__(self, xs, ys, inds=None, return_all_ws=False):
+        xs, ys = xs.cpu(), ys.cpu()
+        if inds is None:
+            inds = range(ys.shape[1])
+        else:
+            if max(inds) >= ys.shape[1] or min(inds) < 0:
+                raise ValueError("inds contain indices where xs and ys are not defined")
+
+        preds = []
+        all_ws = {}
+        for i in inds:
+            if i == 0:
+                preds.append(torch.zeros_like(ys[:, 0]))  # predict zero for first point
+                continue
+            train_xs, train_ys = xs[:, :i], ys[:, :i]
+            test_x = xs[:, i : i + 1]
+
+            ws = torch.zeros(test_x.shape[0], test_x.shape[2], 1)
+
+            for b in range(test_x.shape[0]):
+                train_x = train_xs[b]
+                train_y = train_ys[b]
+                
+                w = self.gradient_descent(train_x, train_y)
+                ws[b] = w
+
+            pred = test_x @ ws
+            preds.append(pred[:, 0, 0])
+            all_ws[i] = ws
+        if return_all_ws:
+            return torch.stack(preds, dim=1), all_ws
+        else:
+            return torch.stack(preds, dim=1)
+        
+# xs and ys should be on cpu for this method. Otherwise the output maybe off in case when train_xs is not full rank due to the implementation of torch.linalg.lstsq.
+class LeastSquaresModelAdaptiveOnlineGradientDescent:
+    def __init__(self):
+        self.name = f"OLS_Adaptive_OGD"
+
+    def gradient_descent(self, X, y):
+        w = torch.rand(X.shape[1], 1) / np.sqrt(X.shape[1])
+        n_samples = X.shape[0]
+        for i in range(n_samples):
+            xi = X[i][:,None]; yi=y[i]
+            grad = xi @ xi.T @ w - yi * xi
+            step_size = (1 / (xi.T @ xi)).item()
+            updates = step_size * grad
+            w = w - updates
+
+        return w
+
+    def __call__(self, xs, ys, inds=None, return_all_ws=False):
+        xs, ys = xs.cpu(), ys.cpu()
+        if inds is None:
+            inds = range(ys.shape[1])
+        else:
+            if max(inds) >= ys.shape[1] or min(inds) < 0:
+                raise ValueError("inds contain indices where xs and ys are not defined")
+
+        preds = []
+        all_ws = {}
+        for i in inds:
+            if i == 0:
+                preds.append(torch.zeros_like(ys[:, 0]))  # predict zero for first point
+                continue
+            train_xs, train_ys = xs[:, :i], ys[:, :i]
+            test_x = xs[:, i : i + 1]
+
+            ws = torch.zeros(test_x.shape[0], test_x.shape[2], 1)
+
+            for b in range(test_x.shape[0]):
+                train_x = train_xs[b]
+                train_y = train_ys[b]
+                
+                w = self.gradient_descent(train_x, train_y)
+                ws[b] = w
+
+            pred = test_x @ ws
+            preds.append(pred[:, 0, 0])
+            all_ws[i] = ws
+        if return_all_ws:
+            return torch.stack(preds, dim=1), all_ws
+        else:
+            return torch.stack(preds, dim=1)

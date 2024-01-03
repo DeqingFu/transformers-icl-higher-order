@@ -3,6 +3,7 @@ import re
 import os
 
 import matplotlib.pyplot as plt
+import matplotlib
 import pandas as pd
 import numpy as np 
 import seaborn as sns
@@ -52,8 +53,7 @@ ys = task.evaluate(xs)
 with torch.no_grad():
     ys_pred, output = model(xs, ys)
 
-suffix = "_standard"
-model_base_path = f"../models/by_layer_linear{suffix}"
+model_base_path = f"../models/by_layer_linear"
 n_layers = conf.model['n_layer']
 metric = task.get_metric()
 n_data = 41
@@ -71,7 +71,33 @@ if not os.path.exists(folder):
 
 tf_layer_index = list(range(1, n_layers+1))
 
+cmap = matplotlib.cm.get_cmap('PuRd')
+def get_color(cmap, idx, max_idx):
+    return cmap(0.2 + (idx+1)/(max_idx+1))
+
+# MSE over examples 
+plt.figure(figsize=(16,9))
+with torch.no_grad():
+     for i in tqdm(range(1, n_layers+1)):
+        if i not in tf_layer_index:
+            continue 
+        model_i, _ = get_model_from_run(f"{model_base_path}/probing_{i}")
+        readout = model_i._read_out
+        hidden_state = output.hidden_states[i]
+        pred_at_i = readout(hidden_state)[:,::2,0]
+        loss = metric(pred_at_i, ys).detach().numpy() / 20
+        plt.plot(loss.mean(axis=0), lw=1, label=f"Hidden Layer #{i}", \
+                 color=get_color(cmap, i, max(tf_layer_index)))
+
+
+plt.yscale("log")
+plt.legend(fontsize=12, loc='lower left')
+plt.title("Average MSE Loss v.s. # In-Context Examples")
+plt.savefig(eval_folder + "/mse_over_examples.pdf", bbox_inches='tight', pad_inches=0.0, dpi=400)
+plt.clf()
+
 def get_tf_residual(layer_index):
+    print(f"Getting TF residual for layer {layer_index}")
     model_i, _ = get_model_from_run(f"{model_base_path}/probing_{layer_index}")
     readout = model_i._read_out
     hidden_state = output.hidden_states[i]
@@ -112,6 +138,7 @@ def plot_correlation(
         method_resid = (method_pred - ys).detach().numpy()
         assert not np.isnan(method_resid).any()
         if np.isnan(method_resid).any():
+            print("Error: NaN in residuals")
             pdb.set_trace()
         target_model_to_resid[param] = method_resid
     
@@ -190,38 +217,3 @@ transformers_gd_map_log = plot_correlation(tf_layer_to_resid, target_model_name=
                                        possible_model_params=gd_steps, 
                                        lr=lr, suffix='log')
 print("gd (log)\n", transformers_gd_map_log)
-
-with torch.no_grad():
-    sim_tf_newton_over_layer = []
-    sim_tf_gd_over_layer = []
-    sim_tf_min_norm_over_layer = []
-    for i in tqdm(tf_layer_index):
-        tf_resid = tf_layer_to_resid[i]
-
-        newton_model = models.LeastSquaresModelNewtonMethod(n_newton_steps=transformers_newton_map[i])
-        newton_resid = (newton_model(xs,ys) - ys).detach().numpy()
-
-        gd_model = models.LeastSquaresModelGradientDescent(n_steps=transformers_gd_map[i],step_size=lr)
-        gd_resid = (gd_model(xs,ys) - ys).detach().numpy()
-
-        min_norm_model = models.LeastSquaresModel()
-        min_norm_resid = (min_norm_model(xs,ys) - ys).detach().numpy()
-
-        
-        sim_tf_newton_over_layer.append(get_average_resid_similarity(tf_resid, newton_resid))
-        sim_tf_gd_over_layer.append(get_average_resid_similarity(tf_resid, gd_resid))
-        sim_tf_min_norm_over_layer.append(get_average_resid_similarity(tf_resid, min_norm_resid))
-        
-        
-        
-    
-
-    plt.plot(tf_layer_index, sim_tf_newton_over_layer, color='red', label='SimE(Transformers, Newton)')
-    plt.plot(tf_layer_index, sim_tf_gd_over_layer, color='blue', label='SimE(Transformers, GD)')
-    plt.plot(tf_layer_index, sim_tf_min_norm_over_layer, color='green', label='SimE(Transformers, OLS)')
-    plt.legend()
-    plt.xlabel("Layer Index", fontsize=16)
-    plt.ylabel("Cosine Similarity", fontsize=16)
-    plt.savefig(folder + f"over_layers.pdf", \
-                bbox_inches='tight', pad_inches=0.1, dpi=400)
-    plt.clf()
