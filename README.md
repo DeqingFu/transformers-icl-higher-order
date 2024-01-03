@@ -36,5 +36,12 @@ You can start by cloning our repository and following the steps below.
 3. Run probing for each Transformers layer
 
     ```
+    cd src
     python probing.py
     ```
+
+4. Compute Transformer's similarities to both Iterative Newton's Method and Gradient Descent
+   
+   ```
+   python eval_similarity.py
+   ```
