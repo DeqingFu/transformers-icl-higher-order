@@ -1,6 +1,6 @@
 # Transformers Learn Higher-Order Optimization Methods for In-Context Learning: A Study with Linear Models
 
-This is an official repository for our paper, [Transformers Learn Higher-Order Optimization Methods for In-Context Learning: A Study with Linear Models](https://arxiv.org/abs/2310.17086)
+This is an official repository for our paper, [Transformers Learn Higher-Order Optimization Methods for In-Context Learning: A Study with Linear Models](https://arxiv.org/abs/2310.17086).
 
 
 ```bibtex
@@ -14,7 +14,7 @@ This is an official repository for our paper, [Transformers Learn Higher-Order O
     }
 ```
 
-Codes are mostly modified from [this prior work](https://github.com/dtsip/in-context-learning/)
+Codes are mostly modified from [this prior work](https://github.com/dtsip/in-context-learning/).
 
 ## Getting started
 You can start by cloning our repository and following the steps below.
