@@ -4,14 +4,14 @@ This is an official repository for our paper, [Transformers Learn Higher-Order O
 
 
 ```bibtex
-    @misc{fu2023transformers,
-      title={Transformers Learn Higher-Order Optimization Methods for In-Context Learning: A Study with Linear Models}, 
-      author={Deqing Fu and Tian-Qi Chen and Robin Jia and Vatsal Sharan},
-      year={2023},
-      eprint={2310.17086},
-      archivePrefix={arXiv},
-      primaryClass={cs.LG}
-    }
+@misc{fu2023transformers,
+    title={Transformers Learn Higher-Order Optimization Methods for In-Context Learning: A Study with Linear Models}, 
+    author={Deqing Fu and Tian-Qi Chen and Robin Jia and Vatsal Sharan},
+    year={2023},
+    eprint={2310.17086},
+    archivePrefix={arXiv},
+    primaryClass={cs.LG}
+}
 ```
 
 Codes are mostly modified from [this prior work](https://github.com/dtsip/in-context-learning/).
@@ -45,3 +45,5 @@ You can start by cloning our repository and following the steps below.
    ```
    python eval_similarity.py
    ```
+
+   This will plot Fig. 1(a) and Fig. 3 in the [paper](https://arxiv.org/abs/2310.17086), under a new folder `eval`.
